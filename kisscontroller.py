@@ -9,10 +9,29 @@ from PIL import ImageGrab
 import socket
 import netifaces
 import subprocess
+import pkg_resources
 import httpx
 from dotenv import load_dotenv
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, ContextTypes, CallbackQueryHandler
+
+# Verify all required packages
+required_packages = ['Pillow', 'httpx', 'sounddevice', 'scipy', 'netifaces']
+
+def check_and_install_packages(packages):
+    installed_packages = {pkg.key for pkg in pkg_resources.working_set}
+    missing_packages = [pkg for pkg in packages if pkg.lower() not in installed_packages]
+    
+    if missing_packages:
+        print(f"Missing packages detected: {', '.join(missing_packages)}. Installing...")
+        for package in missing_packages:
+            subprocess.check_call([sys.executable, '-m', 'pip', 'install', package, '--break-system-packages'])
+        print("All missing packages have been installed.")
+    else:
+        print("All required packages are already installed.")
+
+# Check and install any missing packages before the rest of your script runs
+check_and_install_packages(required_packages)
 
 # Setup logging
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
