@@ -31,9 +31,12 @@ cd kisscontroller
 pip install -r requirements.txt
 
 4. Create a `.env` file in the project root directory with your Telegram Bot token:
+```
 TOKENY=your_actual_bot_token_here
+PASSY=your_actual_password_here
+```
 
-5. Replace the `TOKENY` variable in the script with your Telegram Bot token.
+5. Make sure to replace any instances of TOKENY (Telegram Bot Token) and PASSY (In-bot password) in your script with the corresponding variables to access your credentials.
 
 ## :rocket: Usage
 
@@ -51,6 +54,15 @@ TOKENY=your_actual_bot_token_here
   - `ls <path>`: List contents of a directory
   - `cat <file>`: View contents of a file
 - `/getfile`: Transfer files from the target device
+
+## :seedling: Support the Project  
+
+I have many ideas for this, it can be better, faster, stronger, with your support:
+
+### BTC
+```
+1N2knp6D5egiDnaJEixiqGhPESECEmEfUp
+```
 
 ## :handshake: Contributing
 
